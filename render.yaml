@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: cmoney-monitor
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python cmoney_monitor.py
+    envVars:
+      - key: GMAIL_SENDER
+        sync: false
+      - key: GMAIL_PASSWORD
+        sync: false
+      - key: EMAIL_RECEIVER
+        sync: false
