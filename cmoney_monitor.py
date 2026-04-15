@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
 CMoney 用戶發文監控 - GitHub Actions 版本
-1. 先訪問用戶頁面取得 session cookie
-2. 用 cookie 呼叫 CMoney 內部 API 取得文章列表
-3. 比對新文章，寄 email 通知
-4. 已通知的文章 ID 存在 GitHub Gist
+使用 cookie 呼叫 CMoney 內部 API 取得文章列表
+cookie 存在 GitHub Secrets 的 CMONEY_COOKIE 環境變數中
 """
 
 import requests
@@ -21,7 +19,6 @@ from datetime import datetime
 MEMBER_ID = "7983967"
 USER_NAME = "火火火奇門遁甲隱士發發發"
 
-USER_PAGE_URL = f"https://www.cmoney.tw/forum/user/{MEMBER_ID}"
 API_URL = "https://www.cmoney.tw/api/mach/api/Article/GetChannelsArticleByWeight"
 ARTICLE_BASE_URL = "https://www.cmoney.tw/forum/article"
 
@@ -32,45 +29,28 @@ EMAIL_RECEIVERS = ["yhes3103@gmail.com", "ygk1234w@gmail.com"]
 GIST_TOKEN = os.environ.get("GIST_TOKEN", "")
 GIST_ID = os.environ.get("GIST_ID", "")
 GIST_FILENAME = "cmoney_seen_ids.json"
+
+# 從 GitHub Secrets 取得 cookie
+CMONEY_COOKIE = os.environ.get("CMONEY_COOKIE", "")
 # ================================================
 
 
 def fetch_articles(max_retries: int = 3) -> list:
-    """先取得 session cookie，再透過 API 取得最新文章列表"""
-
-    session = requests.Session()
-    session.headers.update({
+    """透過 CMoney API 取得最新文章列表"""
+    headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/125.0.0.0 Safari/537.36"
         ),
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    })
-
-    # 第一步：訪問用戶頁面，取得 AspSession cookie
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"  [{attempt}] 取得 session cookie...")
-            resp = session.get(USER_PAGE_URL, timeout=20)
-            print(f"  頁面 HTTP {resp.status_code}, cookies: {list(session.cookies.keys())}")
-
-            if resp.status_code == 200:
-                break
-            if attempt < max_retries:
-                time.sleep(3)
-        except requests.exceptions.RequestException as e:
-            print(f"  取得 cookie 失敗: {e}")
-            if attempt < max_retries:
-                time.sleep(3)
-
-    # 第二步：用 session 呼叫 API
-    api_headers = {
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         "Content-Type": "application/json",
         "Origin": "https://www.cmoney.tw",
-        "Referer": USER_PAGE_URL,
+        "Referer": f"https://www.cmoney.tw/forum/user/{MEMBER_ID}",
+        "Cookie": CMONEY_COOKIE,
     }
+
     params = {
         "startScore": "9999999999999999",
         "count": "30",
@@ -82,9 +62,9 @@ def fetch_articles(max_retries: int = 3) -> list:
     for attempt in range(1, max_retries + 1):
         try:
             print(f"  [{attempt}] 呼叫文章 API...")
-            resp = session.post(
+            resp = requests.post(
                 API_URL,
-                headers=api_headers,
+                headers=headers,
                 params=params,
                 json=payload,
                 timeout=20,
@@ -223,11 +203,15 @@ def main():
         print("錯誤：請確認所有環境變數都已設定")
         sys.exit(1)
 
+    if not CMONEY_COOKIE:
+        print("錯誤：請設定 CMONEY_COOKIE 環境變數")
+        sys.exit(1)
+
     articles = fetch_articles()
     print(f"找到 {len(articles)} 篇文章")
 
     if not articles:
-        print("警告：沒有抓到任何文章")
+        print("警告：沒有抓到任何文章，可能 cookie 已過期")
         sys.exit(1)
 
     for a in articles[:5]:
