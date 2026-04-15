@@ -24,4 +24,5 @@ jobs:
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
           GIST_TOKEN:     ${{ secrets.GIST_TOKEN }}
           GIST_ID:        ${{ secrets.GIST_ID }}
+          CMONEY_COOKIE: ${{ secrets.CMONEY_COOKIE }}
         run: python cmoney_monitor.py
