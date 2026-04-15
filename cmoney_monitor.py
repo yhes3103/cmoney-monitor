@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 CMoney 用戶發文監控 - GitHub Actions 版本
-直接呼叫 CMoney 內部 API 取得文章列表（非爬 HTML）
-已通知的文章 ID 存在 GitHub Gist
+1. 先訪問用戶頁面取得 session cookie
+2. 用 cookie 呼叫 CMoney 內部 API 取得文章列表
+3. 比對新文章，寄 email 通知
+4. 已通知的文章 ID 存在 GitHub Gist
 """
 
 import requests
@@ -19,7 +21,7 @@ from datetime import datetime
 MEMBER_ID = "7983967"
 USER_NAME = "火火火奇門遁甲隱士發發發"
 
-# CMoney API
+USER_PAGE_URL = f"https://www.cmoney.tw/forum/user/{MEMBER_ID}"
 API_URL = "https://www.cmoney.tw/api/mach/api/Article/GetChannelsArticleByWeight"
 ARTICLE_BASE_URL = "https://www.cmoney.tw/forum/article"
 
@@ -34,21 +36,41 @@ GIST_FILENAME = "cmoney_seen_ids.json"
 
 
 def fetch_articles(max_retries: int = 3) -> list:
-    """透過 CMoney API 取得最新文章列表"""
-    headers = {
+    """先取得 session cookie，再透過 API 取得最新文章列表"""
+
+    session = requests.Session()
+    session.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/125.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    })
+
+    # 第一步：訪問用戶頁面，取得 AspSession cookie
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"  [{attempt}] 取得 session cookie...")
+            resp = session.get(USER_PAGE_URL, timeout=20)
+            print(f"  頁面 HTTP {resp.status_code}, cookies: {list(session.cookies.keys())}")
+
+            if resp.status_code == 200:
+                break
+            if attempt < max_retries:
+                time.sleep(3)
+        except requests.exceptions.RequestException as e:
+            print(f"  取得 cookie 失敗: {e}")
+            if attempt < max_retries:
+                time.sleep(3)
+
+    # 第二步：用 session 呼叫 API
+    api_headers = {
+        "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
         "Origin": "https://www.cmoney.tw",
-        "Referer": f"https://www.cmoney.tw/forum/user/{MEMBER_ID}",
+        "Referer": USER_PAGE_URL,
     }
-
-    # startScore 用超大數字 = 從最新文章開始抓
     params = {
         "startScore": "9999999999999999",
         "count": "30",
@@ -59,18 +81,18 @@ def fetch_articles(max_retries: int = 3) -> list:
 
     for attempt in range(1, max_retries + 1):
         try:
-            print(f"  第 {attempt} 次嘗試呼叫 API...")
-            resp = requests.post(
+            print(f"  [{attempt}] 呼叫文章 API...")
+            resp = session.post(
                 API_URL,
-                headers=headers,
+                headers=api_headers,
                 params=params,
                 json=payload,
                 timeout=20,
             )
-            print(f"  HTTP {resp.status_code}, 回應長度: {len(resp.text)} 字元")
+            print(f"  API HTTP {resp.status_code}, 回應長度: {len(resp.text)} 字元")
 
             if resp.status_code != 200:
-                print(f"  API 回傳非 200: {resp.text[:200]}")
+                print(f"  API 回傳非 200: {resp.text[:300]}")
                 if attempt < max_retries:
                     time.sleep(5)
                 continue
@@ -97,7 +119,7 @@ def fetch_articles(max_retries: int = 3) -> list:
             return articles
 
         except requests.exceptions.RequestException as e:
-            print(f"  第 {attempt} 次失敗: {e}")
+            print(f"  [{attempt}] API 呼叫失敗: {e}")
             if attempt < max_retries:
                 time.sleep(5)
 
@@ -105,7 +127,6 @@ def fetch_articles(max_retries: int = 3) -> list:
 
 
 def gist_load() -> set:
-    """從 GitHub Gist 載入已看過的文章 ID"""
     headers = {
         "Authorization": f"token {GIST_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
@@ -129,7 +150,6 @@ def gist_load() -> set:
 
 
 def gist_save(seen: set):
-    """儲存已看過的文章 ID 到 GitHub Gist"""
     headers = {
         "Authorization": f"token {GIST_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
@@ -158,7 +178,6 @@ def gist_save(seen: set):
 
 
 def send_email(title: str, article_url: str):
-    """寄送 email 通知"""
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = f"📢 {USER_NAME} 發新文章：{title}"
@@ -204,7 +223,6 @@ def main():
         print("錯誤：請確認所有環境變數都已設定")
         sys.exit(1)
 
-    # 透過 API 抓取文章
     articles = fetch_articles()
     print(f"找到 {len(articles)} 篇文章")
 
@@ -217,11 +235,9 @@ def main():
     if len(articles) > 5:
         print(f"  ... 還有 {len(articles) - 5} 篇")
 
-    # 載入已看過的 ID
     seen = gist_load()
     print(f"[Gist] 已記錄 {len(seen)} 篇文章")
 
-    # 第一次執行：只初始化，不通知
     if not seen:
         print("首次執行，初始化文章清單（不發通知）")
         seen = {a["id"] for a in articles}
@@ -229,7 +245,6 @@ def main():
         print(f"已記錄 {len(seen)} 篇現有文章，之後只通知新文章")
         return
 
-    # 比對新文章
     new = [a for a in articles if a["id"] not in seen]
 
     if not new:
