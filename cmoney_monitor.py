@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 CMoney 用戶發文監控 - GitHub Actions 版本
-使用 cookie 呼叫 CMoney 內部 API 取得文章列表
-cookie 存在 GitHub Secrets 的 CMONEY_COOKIE 環境變數中
+使用 Playwright 無頭瀏覽器模擬真實瀏覽器：
+1. 開啟用戶頁面，等待文章載入
+2. 攔截 API 請求取得文章 JSON
+3. 比對新文章，寄 email 通知
 """
 
-import requests
 import json
 import os
+import re
 import smtplib
 import sys
 import time
@@ -15,11 +17,13 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
+import requests
+from playwright.sync_api import sync_playwright
+
 # ==================== 設定區 ====================
 MEMBER_ID = "7983967"
 USER_NAME = "火火火奇門遁甲隱士發發發"
-
-API_URL = "https://www.cmoney.tw/api/mach/api/Article/GetChannelsArticleByWeight"
+USER_PAGE = f"https://www.cmoney.tw/forum/user/{MEMBER_ID}"
 ARTICLE_BASE_URL = "https://www.cmoney.tw/forum/article"
 
 GMAIL_SENDER = os.environ.get("GMAIL_SENDER", "")
@@ -29,81 +33,96 @@ EMAIL_RECEIVERS = ["yhes3103@gmail.com", "ygk1234w@gmail.com"]
 GIST_TOKEN = os.environ.get("GIST_TOKEN", "")
 GIST_ID = os.environ.get("GIST_ID", "")
 GIST_FILENAME = "cmoney_seen_ids.json"
-
-# 從 GitHub Secrets 取得 cookie
-CMONEY_COOKIE = os.environ.get("CMONEY_COOKIE", "")
 # ================================================
 
 
-def fetch_articles(max_retries: int = 3) -> list:
-    """透過 CMoney API 取得最新文章列表"""
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Content-Type": "application/json",
-        "Origin": "https://www.cmoney.tw",
-        "Referer": f"https://www.cmoney.tw/forum/user/{MEMBER_ID}",
-        "Cookie": CMONEY_COOKIE,
-    }
+def fetch_articles() -> list:
+    """用 Playwright 開啟頁面，攔截 API 回應取得文章列表"""
+    articles = []
+    api_articles = []
 
-    params = {
-        "startScore": "9999999999999999",
-        "count": "30",
-    }
-    payload = {
-        "items": [f"Member-All.{MEMBER_ID}"]
-    }
+    def handle_response(response):
+        """攔截 GetChannelsArticleByWeight API 回應"""
+        if "GetChannelsArticleByWeight" in response.url and response.status == 200:
+            try:
+                data = response.json()
+                if isinstance(data, list):
+                    api_articles.extend(data)
+                    print(f"  攔截到 API 回應: {len(data)} 篇文章")
+            except Exception:
+                pass
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"  [{attempt}] 呼叫文章 API...")
-            resp = requests.post(
-                API_URL,
-                headers=headers,
-                params=params,
-                json=payload,
-                timeout=20,
-            )
-            print(f"  API HTTP {resp.status_code}, 回應長度: {len(resp.text)} 字元")
+    print("  啟動瀏覽器...")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            locale="zh-TW",
+        )
+        page = context.new_page()
 
-            if resp.status_code != 200:
-                print(f"  API 回傳非 200: {resp.text[:300]}")
-                if attempt < max_retries:
-                    time.sleep(5)
-                continue
+        # 監聽所有 response
+        page.on("response", handle_response)
 
-            data = resp.json()
+        print("  載入用戶頁面...")
+        page.goto(USER_PAGE, wait_until="networkidle", timeout=30000)
 
-            if not isinstance(data, list):
-                print(f"  API 回傳格式不是 list: {type(data)}")
-                if attempt < max_retries:
-                    time.sleep(5)
-                continue
+        # 往下滾動觸發載入更多文章
+        print("  滾動頁面載入更多文章...")
+        for i in range(3):
+            page.evaluate("window.scrollBy(0, 2000)")
+            page.wait_for_timeout(2000)
 
-            articles = []
-            for item in data:
+        # 如果 API 攔截有結果，優先使用
+        if api_articles:
+            print(f"  從 API 取得 {len(api_articles)} 篇文章")
+            seen = set()
+            for item in api_articles:
                 article_id = str(item.get("id", ""))
+                if article_id in seen:
+                    continue
+                seen.add(article_id)
                 title = item.get("content", {}).get("title", "（無標題）")
-                url = f"{ARTICLE_BASE_URL}/{article_id}"
                 articles.append({
                     "id": article_id,
                     "title": title,
-                    "url": url,
+                    "url": f"{ARTICLE_BASE_URL}/{article_id}",
                 })
 
-            return articles
+        # Fallback: 從頁面 HTML 解析
+        if not articles:
+            print("  API 攔截無結果，改從 HTML 解析...")
+            html = page.content()
+            seen = set()
+            for match in re.finditer(
+                r'href="(?:https://www\.cmoney\.tw)?/forum/article/(\d+)"', html
+            ):
+                article_id = match.group(1)
+                if article_id in seen:
+                    continue
+                seen.add(article_id)
 
-        except requests.exceptions.RequestException as e:
-            print(f"  [{attempt}] API 呼叫失敗: {e}")
-            if attempt < max_retries:
-                time.sleep(5)
+                title = "（無標題）"
+                title_match = re.search(
+                    rf'article/{article_id}.*?<h3[^>]*>(.*?)</h3>',
+                    html, re.DOTALL,
+                )
+                if title_match:
+                    title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
 
-    return []
+                articles.append({
+                    "id": article_id,
+                    "title": title,
+                    "url": f"{ARTICLE_BASE_URL}/{article_id}",
+                })
+
+        browser.close()
+
+    return articles
 
 
 def gist_load() -> set:
@@ -203,15 +222,11 @@ def main():
         print("錯誤：請確認所有環境變數都已設定")
         sys.exit(1)
 
-    if not CMONEY_COOKIE:
-        print("錯誤：請設定 CMONEY_COOKIE 環境變數")
-        sys.exit(1)
-
     articles = fetch_articles()
     print(f"找到 {len(articles)} 篇文章")
 
     if not articles:
-        print("警告：沒有抓到任何文章，可能 cookie 已過期")
+        print("警告：沒有抓到任何文章")
         sys.exit(1)
 
     for a in articles[:5]:
