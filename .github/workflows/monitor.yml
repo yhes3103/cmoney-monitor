@@ -16,7 +16,9 @@ jobs:
           python-version: "3.11"
 
       - name: 安裝依賴
-        run: pip install requests
+        run: |
+          pip install requests playwright
+          playwright install chromium --with-deps
 
       - name: 執行監控
         env:
@@ -24,5 +26,4 @@ jobs:
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
           GIST_TOKEN:     ${{ secrets.GIST_TOKEN }}
           GIST_ID:        ${{ secrets.GIST_ID }}
-          CMONEY_COOKIE: ${{ secrets.CMONEY_COOKIE }}
         run: python cmoney_monitor.py
