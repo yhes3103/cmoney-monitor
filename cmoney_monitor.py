@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 CMoney 用戶發文監控 - GitHub Actions 版本
-使用 Playwright 無頭瀏覽器模擬真實瀏覽器：
-1. 開啟用戶頁面，等待文章載入
-2. 攔截 API 請求取得文章 JSON
-3. 比對新文章，寄 email 通知
+使用 Playwright 無頭瀏覽器：
+1. 開啟用戶頁面，攔截 API 回應取得文章 JSON
+2. 比對新文章，寄 email 通知
 """
 
 import json
@@ -38,11 +37,9 @@ GIST_FILENAME = "cmoney_seen_ids.json"
 
 def fetch_articles() -> list:
     """用 Playwright 開啟頁面，攔截 API 回應取得文章列表"""
-    articles = []
     api_articles = []
 
     def handle_response(response):
-        """攔截 GetChannelsArticleByWeight API 回應"""
         if "GetChannelsArticleByWeight" in response.url and response.status == 200:
             try:
                 data = response.json()
@@ -64,20 +61,28 @@ def fetch_articles() -> list:
             locale="zh-TW",
         )
         page = context.new_page()
-
-        # 監聽所有 response
         page.on("response", handle_response)
 
-        print("  載入用戶頁面...")
-        page.goto(USER_PAGE, wait_until="networkidle", timeout=30000)
+        try:
+            print("  載入用戶頁面...")
+            # 用 domcontentloaded 避免 networkidle 超時
+            page.goto(USER_PAGE, wait_until="domcontentloaded", timeout=60000)
 
-        # 往下滾動觸發載入更多文章
-        print("  滾動頁面載入更多文章...")
-        for i in range(3):
-            page.evaluate("window.scrollBy(0, 2000)")
-            page.wait_for_timeout(2000)
+            # 等待頁面 JS 載入文章
+            print("  等待文章載入...")
+            page.wait_for_timeout(8000)
 
-        # 如果 API 攔截有結果，優先使用
+            # 往下滾動觸發載入更多文章
+            print("  滾動頁面...")
+            for i in range(3):
+                page.evaluate("window.scrollBy(0, 2000)")
+                page.wait_for_timeout(3000)
+
+        except Exception as e:
+            print(f"  頁面載入異常: {e}")
+
+        # 從攔截到的 API 回應取得文章
+        articles = []
         if api_articles:
             print(f"  從 API 取得 {len(api_articles)} 篇文章")
             seen = set()
@@ -93,32 +98,33 @@ def fetch_articles() -> list:
                     "url": f"{ARTICLE_BASE_URL}/{article_id}",
                 })
 
-        # Fallback: 從頁面 HTML 解析
+        # Fallback: 從 HTML 解析
         if not articles:
-            print("  API 攔截無結果，改從 HTML 解析...")
-            html = page.content()
-            seen = set()
-            for match in re.finditer(
-                r'href="(?:https://www\.cmoney\.tw)?/forum/article/(\d+)"', html
-            ):
-                article_id = match.group(1)
-                if article_id in seen:
-                    continue
-                seen.add(article_id)
-
-                title = "（無標題）"
-                title_match = re.search(
-                    rf'article/{article_id}.*?<h3[^>]*>(.*?)</h3>',
-                    html, re.DOTALL,
-                )
-                if title_match:
-                    title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
-
-                articles.append({
-                    "id": article_id,
-                    "title": title,
-                    "url": f"{ARTICLE_BASE_URL}/{article_id}",
-                })
+            print("  API 無結果，改從 HTML 解析...")
+            try:
+                html = page.content()
+                seen = set()
+                for match in re.finditer(
+                    r'href="(?:https://www\.cmoney\.tw)?/forum/article/(\d+)"', html
+                ):
+                    article_id = match.group(1)
+                    if article_id in seen:
+                        continue
+                    seen.add(article_id)
+                    title = "（無標題）"
+                    title_match = re.search(
+                        rf'article/{article_id}.*?<h3[^>]*>(.*?)</h3>',
+                        html, re.DOTALL,
+                    )
+                    if title_match:
+                        title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
+                    articles.append({
+                        "id": article_id,
+                        "title": title,
+                        "url": f"{ARTICLE_BASE_URL}/{article_id}",
+                    })
+            except Exception as e:
+                print(f"  HTML 解析失敗: {e}")
 
         browser.close()
 
